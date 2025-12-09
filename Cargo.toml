@@ -2,8 +2,10 @@
 members = ["benchmarks"]
 
 [workspace.dependencies]
-datafusion = { version = "51.0.0", default-features = false }
-datafusion-proto = { version = "51.0.0" }
+# Using PR #19124 to preserve file partitioning and avoid unnecessary repartitioning
+# https://github.com/apache/datafusion/pull/19124
+datafusion = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/preserve_file_partitioning", default-features = false }
+datafusion-proto = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/preserve_file_partitioning" }
 
 [package]
 name = "datafusion-distributed"
@@ -72,3 +74,4 @@ arrow = "57.0.0"
 tokio-stream = "0.1.17"
 hyper-util = "0.1.16"
 pretty_assertions = "1.4"
+regex = "1.11"
