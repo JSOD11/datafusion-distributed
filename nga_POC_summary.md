@@ -93,8 +93,11 @@ ORDER BY env, time_bin
 ```
 
 
+![Distributed POC Diagram](./distributedPOC.png)
+
 ## TODOs
 
+0. MUST: Verify why there is no Dynamic Filtering? CVS files?
 1. MUST: Distributed dim & fact files correctly for partitioned hash join 
 2. MUST: Build custom TaskEstimator 
 3. OPTINAL: Make space aggregation happen in stage1 
