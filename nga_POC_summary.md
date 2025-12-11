@@ -95,7 +95,7 @@ ORDER BY env, time_bin
 
 ## TODOs
 
-1. MUST: Distributed context & points files correctly for partitioned hash join (Nga to document & explain to Xavier, Justin & the whole team)
-2. MUST: Build custom TaskEstimator in dd-datatusion (See [slack conversation](https://dd.slack.com/archives/C090VBJKHTM/p1765392267759309)) (Justin?)
+1. MUST: Distributed dim & fact files correctly for partitioned hash join 
+2. MUST: Build custom TaskEstimator 
 3. OPTINAL: Make space aggregation happen in stage1 
 
