@@ -4,8 +4,10 @@ members = ["benchmarks"]
 [workspace.dependencies]
 # Using PR #19124 to preserve file partitioning and avoid unnecessary repartitioning
 # https://github.com/apache/datafusion/pull/19124
-datafusion = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/preserve_file_partitioning", default-features = false }
-datafusion-proto = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/preserve_file_partitioning" }
+# PLUS hash superset satisfies partitioning optimization
+# https://github.com/gene-bordegaray/datafusion/pull/3
+datafusion = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/hash_superset_satisfies_partitioning", default-features = false }
+datafusion-proto = { git = "https://github.com/gene-bordegaray/datafusion.git", branch = "gene.bordegaray/2025/12/hash_superset_satisfies_partitioning" }
 
 [package]
 name = "datafusion-distributed"

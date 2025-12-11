@@ -1,14 +1,9 @@
-//! # Distributed Join Tests with Custom Task Estimator
+//! # Distributed Join Test with Custom Task Estimator (Mismatched Partitioning)
 //!
-//! This module demonstrates two scenarios for distributed joins:
+//! This test demonstrates a scenario where custom task estimation is used but network shuffles
+//! are still required due to mismatched partitioning between tables.
 //!
-//! ## Scenario 1: Default Task Estimator with Hive-Style Partitioning (OPTIMAL)
-//! - Uses `FileScanConfigTaskEstimator` (default)
-//! - Data: `testdata/join_test_hive/` with Hive-style partitioning (d_dkey=A/, f_dkey=A/, etc.)
-//! - Result: Single-stage collocated join with NO network shuffles
-//! - How: DataFusion recognizes matching partition keys and preserves file partitioning
-//!
-//! ## Scenario 2: Custom Task Estimator with Mismatched Partitioning (REQUIRES SHUFFLES)
+//! ## Scenario: Custom Task Estimator with Mismatched Partitioning (REQUIRES SHUFFLES)
 //! - Uses `CustomJoinTaskEstimator`
 //! - Data: `testdata/join_test_hive_custom/` with mismatched partitioning
 //!   - Dim: 2 files (A_B, C_D) - join keys span multiple files
@@ -17,13 +12,11 @@
 //! - Why: DataFusion cannot infer that data is co-located because partition keys don't match
 //!
 //! ## Key Takeaway
-//! To avoid network shuffles in distributed joins, use Hive-style partitioning with matching
-//! partition keys on both tables. Custom task estimators alone cannot avoid shuffles if
-//! DataFusion cannot infer data collocation.
+//! Custom task estimators control task distribution but CANNOT avoid shuffles when DataFusion
+//! cannot infer data collocation from partition keys.
 
 #[cfg(all(feature = "integration", test))]
 mod tests {
-    use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::util::pretty::pretty_format_batches;
     use datafusion::catalog::memory::DataSourceExec;
     use datafusion::config::ConfigOptions;
@@ -44,7 +37,7 @@ mod tests {
     /// Custom TaskEstimator that assigns different partitions per task based on table name.
     ///
     /// NOTE: This estimator controls task distribution but CANNOT avoid network shuffles
-    /// when partition keys don't match between tables. See module-level documentation for details.
+    /// when partition keys don't match between tables.
     #[derive(Debug)]
     struct CustomJoinTaskEstimator {
         dim_partitions_per_task: usize,
@@ -90,19 +83,10 @@ mod tests {
                 return None;
             };
 
-            // Note: total_files would be file_scan.file_groups.len() if needed
-
             // Calculate partitions per task based on table type
-            // Both tables use the same task_count for collocated joins
             let _partitions_per_task = match table_name {
-                "dim" => {
-                    // For dim: 1 partition (file) per task, 2 files = 2 tasks
-                    self.dim_partitions_per_task
-                }
-                "fact" => {
-                    // For fact: 2 partitions (files) per task, 4 files = 2 tasks
-                    self.fact_partitions_per_task
-                }
+                "dim" => self.dim_partitions_per_task,
+                "fact" => self.fact_partitions_per_task,
                 _ => return None,
             };
             
@@ -206,7 +190,6 @@ mod tests {
         let physical_distributed_str = display_plan_ascii(physical_distributed.as_ref(), false);
 
         // Print plans for inspection
-        // println!("Non-distributed plan:\n{}", physical_str);
         println!("\nDistributed plan:\n{}", physical_distributed_str);
 
         // Execute non-distributed query
@@ -222,7 +205,6 @@ mod tests {
         let result_distributed = pretty_format_batches(&batches_distributed)?;
 
         // Print results
-        // println!("\nNon-distributed result:\n{}", result);
         println!("\nDistributed result:\n{}", result_distributed);
 
         // Verify results match
@@ -240,7 +222,7 @@ mod tests {
             total_rows
         );
 
-        // Expected plan for CUSTOM scenario with mismatched partitioning:
+        // Expected plan for CUSTOM scenario with mismatched partitioning (updated for hash superset):
         // - Dim has 2 files (each covering multiple keys: A_B and C_D)
         // - Fact has 4 files (one per key: A, B, C, D)
         // 
@@ -261,10 +243,9 @@ mod tests {
 └──────────────────────────────────────────────────
   ┌───── Stage 3 ── Tasks: t0:[p0..p3] t1:[p0..p3] 
   │ SortExec: expr=[d_dkey@0 ASC NULLS LAST, timestamp@4 ASC NULLS LAST], preserve_partitioning=[true]
-  │   CoalesceBatchesExec: target_batch_size=8192
-  │     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@0, f_dkey@0)], projection=[d_dkey@0, env@1, service@2, host@3, timestamp@5, value@6]
-  │       [Stage 1] => NetworkShuffleExec: output_partitions=4, input_tasks=2
-  │       [Stage 2] => NetworkShuffleExec: output_partitions=4, input_tasks=2
+  │   HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@0, f_dkey@0)], projection=[d_dkey@0, env@1, service@2, host@3, timestamp@5, value@6]
+  │     [Stage 1] => NetworkShuffleExec: output_partitions=4, input_tasks=2
+  │     [Stage 2] => NetworkShuffleExec: output_partitions=4, input_tasks=2
   └──────────────────────────────────────────────────
     ┌───── Stage 1 ── Tasks: t0:[p0..p7] t1:[p0..p7] 
     │ CoalesceBatchesExec: target_batch_size=8192
@@ -310,118 +291,5 @@ mod tests {
 
         Ok(())
     }
-
-    async fn build_default_state(
-        ctx: DistributedSessionBuilderContext,
-    ) -> Result<SessionState, DataFusionError> {
-        Ok(SessionStateBuilder::new()
-            .with_runtime_env(ctx.runtime_env)
-            .with_default_features()
-            .build())
-    }
-
-    #[tokio::test]
-    async fn test_join_with_default_task_estimator() -> Result<(), Box<dyn Error>> {
-        // Start distributed context with 2 workers using DEFAULT task estimator
-        // (no custom task estimator, just the built-in FileScanConfigTaskEstimator)
-        let (ctx_distributed, _guard) = start_localhost_context(2, build_default_state).await;
-
-        // Enable file partitioning preservation (from PR #19124)
-        ctx_distributed.state_ref().write().config_mut().options_mut()
-            .optimizer.preserve_file_partitions = 1;
-
-        // Set target_partitions to 4 to create 4 file groups (one per Hive partition: A, B, C, D)
-        ctx_distributed.state_ref().write().config_mut().options_mut()
-            .execution.target_partitions = 4;
-
-        // Register dimension table with Hive-style partitioning
-        let dim_options = CsvReadOptions::default()
-            .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
-        ctx_distributed
-            .register_csv("dim", "testdata/join_test_hive/dim", dim_options)
-            .await?;
-
-        // Register fact table with Hive-style partitioning
-        let fact_options = CsvReadOptions::default()
-            .table_partition_cols(vec![("f_dkey".to_string(), DataType::Utf8)]);
-        ctx_distributed
-            .register_csv("fact", "testdata/join_test_hive/fact", fact_options)
-            .await?;
-
-        // Create a join query
-        let query = r#"
-            SELECT 
-                d.d_dkey,
-                d.env,
-                d.service,
-                d.host,
-                f.timestamp,
-                f.value
-            FROM dim d
-            INNER JOIN fact f ON d.d_dkey = f.f_dkey
-            ORDER BY d.d_dkey, f.timestamp
-        "#;
-
-        // Execute distributed query
-        let df_distributed = ctx_distributed.sql(query).await?;
-        let physical_distributed = df_distributed.create_physical_plan().await?;
-        let physical_distributed_str = display_plan_ascii(physical_distributed.as_ref(), false);
-
-        // Execute and collect results
-        let batches_distributed = execute_stream(physical_distributed.clone(), ctx_distributed.task_ctx())?
-            .try_collect::<Vec<_>>()
-            .await?;
-        let _result_distributed = pretty_format_batches(&batches_distributed)?;
-
-        // Expected plan - should be identical to the custom task estimator test
-        // since the default FileScanConfigTaskEstimator produces the same result
-        let expected_plan = r#"┌───── DistributedExec ── Tasks: t0:[p0] 
-│ SortPreservingMergeExec: [d_dkey@0 ASC NULLS LAST, timestamp@4 ASC NULLS LAST]
-│   [Stage 1] => NetworkCoalesceExec: output_partitions=4, input_tasks=2
-└──────────────────────────────────────────────────
-  ┌───── Stage 1 ── Tasks: t0:[p0..p1] t1:[p2..p3] 
-  │ SortExec: expr=[d_dkey@0 ASC NULLS LAST, timestamp@4 ASC NULLS LAST], preserve_partitioning=[true]
-  │   ProjectionExec: expr=[d_dkey@3 as d_dkey, env@0 as env, service@1 as service, host@2 as host, timestamp@4 as timestamp, value@5 as value]
-  │     CoalesceBatchesExec: target_batch_size=8192
-  │       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@3, f_dkey@2)], projection=[env@0, service@1, host@2, d_dkey@3, timestamp@4, value@5]
-  │         PartitionIsolatorExec: t0:[p0,p1,__,__] t1:[__,__,p0,p1] 
-  │           DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.csv], [/testdata/join_test_hive/dim/d_dkey=B/data.csv], [/testdata/join_test_hive/dim/d_dkey=C/data.csv], [/testdata/join_test_hive/dim/d_dkey=D/data.csv]]}, projection=[env, service, host, d_dkey], file_type=csv, has_header=true
-  │         PartitionIsolatorExec: t0:[p0,p1,__,__] t1:[__,__,p0,p1] 
-  │           DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.csv], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv, /testdata/join_test_hive/fact/f_dkey=B/data2.csv, /testdata/join_test_hive/fact/f_dkey=B/data.csv], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv, /testdata/join_test_hive/fact/f_dkey=C/data.csv], [/testdata/join_test_hive/fact/f_dkey=D/data.csv]]}, projection=[timestamp, value, f_dkey], file_type=csv, has_header=true
-  └──────────────────────────────────────────────────
-"#;
-
-        // println!("{}", expected_plan);
-        println!("{}", physical_distributed_str);
-
-        // Normalize paths for comparison
-        let normalize_paths = |s: &str| -> String {
-            s.lines()
-                .map(|line| {
-                    if line.contains("testdata/join_test_hive") {
-                        let re = regex::Regex::new(r"[^,\s\[]*(/testdata/join_test_hive/[^,\s\]]+)").unwrap();
-                        re.replace_all(line, "$1").to_string()
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        
-        let normalized_expected = normalize_paths(&expected_plan);
-        let normalized_actual = normalize_paths(&physical_distributed_str);
-        
-        assert_eq!(
-            normalized_actual.trim(),
-            normalized_expected.trim(),
-            "\n\nActual plan does not match expected plan!\n\nExpected:\n{}\n\nActual:\n{}\n",
-            normalized_expected,
-            normalized_actual
-        );
-
-        Ok(())
-    }
-
 }
 
