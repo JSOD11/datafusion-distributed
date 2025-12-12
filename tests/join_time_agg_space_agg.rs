@@ -34,6 +34,12 @@ mod tests {
         ctx_distributed.state_ref().write().config_mut().options_mut()
             .execution.target_partitions = 4;
 
+        // Enable hash join inlist pushdown for dynamic filtering
+        ctx_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.hash_join_inlist_pushdown_max_size = 100;
+        ctx_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.hash_join_inlist_pushdown_max_distinct_values = 100;
+
         // Register dimension table with Hive-style partitioning
         let dim_options = CsvReadOptions::default()
             .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
