@@ -127,6 +127,10 @@ mod tests {
         use datafusion::prelude::SessionContext;
         let ctx_non_distributed = SessionContext::new();
 
+        // Enable file partitioning preservation in non-distributed context too
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.preserve_file_partitions = 1;
+
         // Register the same tables in non-distributed context
         let dim_options_nd = CsvReadOptions::default()
             .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
@@ -226,17 +230,13 @@ mod tests {
             normalized_actual
         );
 
-        // Expected non-distributed plan
+        // Expected non-distributed plan (with preserve_file_partitions enabled)
         let expected_non_distributed_plan = r#"SortPreservingMergeExec: [f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST]
   SortExec: expr=[f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST], preserve_partitioning=[true]
     ProjectionExec: expr=[f_dkey@5 as f_dkey, timestamp@3 as timestamp, value@4 as value, env@0 as env, service@1 as service, host@2 as host]
       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@3, f_dkey@2)], projection=[env@0, service@1, host@2, timestamp@4, value@5, f_dkey@6]
-        CoalesceBatchesExec: target_batch_size=8192
-          RepartitionExec: partitioning=Hash([d_dkey@3], 16), input_partitions=4
-            DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.csv], [/testdata/join_test_hive/dim/d_dkey=B/data.csv], [/testdata/join_test_hive/dim/d_dkey=C/data.csv], [/testdata/join_test_hive/dim/d_dkey=D/data.csv]]}, projection=[env, service, host, d_dkey], file_type=csv, has_header=true
-        CoalesceBatchesExec: target_batch_size=8192
-          RepartitionExec: partitioning=Hash([f_dkey@2], 16), input_partitions=16
-            DataSourceExec: file_groups={16 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.csv:0..65], [/testdata/join_test_hive/fact/f_dkey=B/data.csv:0..96], [/testdata/join_test_hive/fact/f_dkey=B/data2.csv:0..83], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv:0..71], [/testdata/join_test_hive/fact/f_dkey=C/data.csv:0..66], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv:0..66], [/testdata/join_test_hive/fact/f_dkey=D/data.csv:0..92], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv:66..132], [/testdata/join_test_hive/fact/f_dkey=C/data.csv:66..132], [/testdata/join_test_hive/fact/f_dkey=A/data.csv:65..130], [/testdata/join_test_hive/fact/f_dkey=B/data.csv:96..193], [/testdata/join_test_hive/fact/f_dkey=B/data2.csv:83..167], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv:71..142], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv:132..199], [/testdata/join_test_hive/fact/f_dkey=C/data.csv:132..199], [/testdata/join_test_hive/fact/f_dkey=A/data.csv:130..197]]}, projection=[timestamp, value, f_dkey], output_ordering=[f_dkey@2 ASC, timestamp@0 ASC], file_type=csv, has_header=true
+        DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.csv], [/testdata/join_test_hive/dim/d_dkey=B/data.csv], [/testdata/join_test_hive/dim/d_dkey=C/data.csv], [/testdata/join_test_hive/dim/d_dkey=D/data.csv]]}, projection=[env, service, host, d_dkey], file_type=csv, has_header=true
+        DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.csv], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv, /testdata/join_test_hive/fact/f_dkey=B/data2.csv, /testdata/join_test_hive/fact/f_dkey=B/data.csv], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv, /testdata/join_test_hive/fact/f_dkey=C/data.csv], [/testdata/join_test_hive/fact/f_dkey=D/data.csv]]}, projection=[timestamp, value, f_dkey], file_type=csv, has_header=true
 "#;
 
         let normalized_expected_nd = normalize_paths(&expected_non_distributed_plan);
