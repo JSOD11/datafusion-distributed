@@ -13,28 +13,28 @@ The test uses Hive-style partitioned data located in `testdata/join_test_hive/`:
 ***Data Partitions**
 
 ```
-testdata/join_test_hive/
-├── dim/
-│   ├── d_dkey=A/
-│   │   └── data.csv
-│   ├── d_dkey=B/
-│   │   └── data.csv
-│   ├── d_dkey=C/
-│   │   └── data.csv
-│   └── d_dkey=D/
-│       └── data.csv
-└── fact/
-    ├── f_dkey=A/
-    │   └── data.csv
-    ├── f_dkey=B/
-    │   ├── data.csv
-    │   ├── data2.csv
-    │   └── data3.csv
-    ├── f_dkey=C/
-    │   ├── data.csv
-    │   └── data2.csv
-    └── f_dkey=D/
-        └── data.csv
+    testdata/join_test_hive/
+    ├── dim/
+    │   ├── d_dkey=A/
+    │   │   └── data.csv
+    │   ├── d_dkey=B/
+    │   │   └── data.csv
+    │   ├── d_dkey=C/
+    │   │   └── data.csv
+    │   └── d_dkey=D/
+    │       └── data.csv
+    └── fact/
+        ├── f_dkey=A/
+        │   └── data.csv
+        ├── f_dkey=B/
+        │   ├── data.csv
+        │   ├── data2.csv
+        │   └── data3.csv
+        ├── f_dkey=C/
+        │   ├── data.csv
+        │   └── data2.csv
+        └── f_dkey=D/
+            └── data.csv
 ```
 
 - dim is partitioned by d_dkey  (join key of the query)
