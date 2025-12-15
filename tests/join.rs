@@ -34,7 +34,7 @@ mod tests {
     use datafusion::error::DataFusionError;
     use datafusion::execution::{SessionState, SessionStateBuilder};
     use datafusion::physical_plan::{execute_stream, ExecutionPlan};
-    use datafusion::prelude::CsvReadOptions;
+    use datafusion::prelude::{CsvReadOptions, ParquetReadOptions};
     use datafusion_distributed::test_utils::localhost::start_localhost_context;
     use datafusion_distributed::{
         DistributedExt, DistributedSessionBuilderContext, PartitionIsolatorExec, TaskEstimation,
@@ -238,6 +238,208 @@ mod tests {
         DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.csv], [/testdata/join_test_hive/dim/d_dkey=B/data.csv], [/testdata/join_test_hive/dim/d_dkey=C/data.csv], [/testdata/join_test_hive/dim/d_dkey=D/data.csv]]}, projection=[env, service, host, d_dkey], file_type=csv, has_header=true
         DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.csv], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv, /testdata/join_test_hive/fact/f_dkey=B/data2.csv, /testdata/join_test_hive/fact/f_dkey=B/data.csv], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv, /testdata/join_test_hive/fact/f_dkey=C/data.csv], [/testdata/join_test_hive/fact/f_dkey=D/data.csv]]}, projection=[timestamp, value, f_dkey], file_type=csv, has_header=true
 "#;
+
+        let normalized_expected_nd = normalize_paths(&expected_non_distributed_plan);
+        let normalized_actual_nd = normalize_paths(&physical_non_distributed_str);
+        
+        assert_eq!(
+            normalized_actual_nd.trim(),
+            normalized_expected_nd.trim(),
+            "\n\nActual non-distributed plan does not match expected!\n\nExpected:\n{}\n\nActual:\n{}\n",
+            normalized_expected_nd,
+            normalized_actual_nd
+        );
+
+        Ok(())
+    }
+
+
+
+    #[tokio::test]
+    async fn test_join_with_default_task_estimator_parquet() -> Result<(), Box<dyn Error>> {
+        // Start distributed context with 2 workers using DEFAULT task estimator
+        // (no custom task estimator, just the built-in FileScanConfigTaskEstimator)
+        let (ctx_distributed, _guard) = start_localhost_context(2, build_default_state).await;
+
+        // Enable file partitioning preservation (from PR #19124)
+        ctx_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.preserve_file_partitions = 1;
+
+        // Set target_partitions to 4 to create 4 file groups (one per Hive partition: A, B, C, D)
+        ctx_distributed.state_ref().write().config_mut().options_mut()
+            .execution.target_partitions = 4;
+
+        // Register dimension table with Hive-style partitioning
+        let dim_options = ParquetReadOptions::default()
+            .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
+        ctx_distributed
+            .register_parquet("dim", "testdata/join_test_hive/dim", dim_options)
+            .await?;
+
+        // Register fact table with Hive-style partitioning
+        // IMPORTANT: Declare sort order as (f_dkey, timestamp) following the pattern from
+        // https://github.com/gene-bordegaray/datafusion/pull/3/files
+        //
+        // This is crucial for query optimization, especially for operations that
+        // can benefit from knowing the global sort order.
+        let fact_options = ParquetReadOptions::default()
+            .table_partition_cols(vec![("f_dkey".to_string(), DataType::Utf8)])
+            .file_sort_order(vec![ // NGA: This sort order definition seems not working
+                vec![
+                    datafusion::prelude::col("f_dkey").sort(true, true), // ASC NULLS FIRST
+                    datafusion::prelude::col("timestamp").sort(true, true), // ASC NULLS FIRST
+                ]
+            ]);
+        ctx_distributed
+            .register_parquet("fact", "testdata/join_test_hive/fact", fact_options)
+            .await?;
+
+        // Create a join query
+        let query = r#"
+            SELECT 
+                f.f_dkey,
+                f.timestamp,
+                f.value,
+                d.env,
+                d.service,
+                d.host
+            FROM dim d
+            INNER JOIN fact f ON d.d_dkey = f.f_dkey
+            ORDER BY f.f_dkey, f.timestamp
+        "#;
+
+        // Execute distributed query
+        let df_distributed = ctx_distributed.sql(query).await?;
+        let physical_distributed = df_distributed.create_physical_plan().await?;
+        let physical_distributed_str = display_plan_ascii(physical_distributed.as_ref(), false);
+
+        println!("\n=== DISTRIBUTED PLAN ===");
+        println!("{}", physical_distributed_str);
+
+        // Execute and collect distributed results
+        let batches_distributed = execute_stream(physical_distributed.clone(), ctx_distributed.task_ctx())?
+            .try_collect::<Vec<_>>()
+            .await?;
+        let result_distributed = pretty_format_batches(&batches_distributed)?;
+
+        println!("\n=== DISTRIBUTED RESULTS ===");
+        println!("{}", result_distributed);
+
+        // Create a non-distributed context for comparison
+        use datafusion::prelude::SessionContext;
+        let ctx_non_distributed = SessionContext::new();
+
+        // Enable file partitioning preservation in non-distributed context too
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.preserve_file_partitions = 1;
+
+        // Register the same tables in non-distributed context
+        let dim_options_nd = ParquetReadOptions::default()
+            .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
+        ctx_non_distributed
+            .register_parquet("dim", "testdata/join_test_hive/dim", dim_options_nd)
+            .await?;
+
+        let fact_options_nd = ParquetReadOptions::default()
+            .table_partition_cols(vec![("f_dkey".to_string(), DataType::Utf8)])
+            .file_sort_order(vec![
+                vec![
+                    datafusion::prelude::col("f_dkey").sort(true, true),
+                    datafusion::prelude::col("timestamp").sort(true, true),
+                ]
+            ]);
+        ctx_non_distributed
+            .register_parquet("fact", "testdata/join_test_hive/fact", fact_options_nd)
+            .await?;
+
+        // Execute the same query in non-distributed context
+        let df_non_distributed = ctx_non_distributed.sql(query).await?;
+        let physical_non_distributed = df_non_distributed.clone().create_physical_plan().await?;
+        let physical_non_distributed_str = display_plan_ascii(physical_non_distributed.as_ref(), false);
+
+        println!("\n=== NON-DISTRIBUTED PLAN ===");
+        println!("{}", physical_non_distributed_str);
+
+        let batches_non_distributed = df_non_distributed.collect().await?;
+        let result_non_distributed = pretty_format_batches(&batches_non_distributed)?;
+
+        println!("\n=== NON-DISTRIBUTED RESULTS ===");
+        println!("{}", result_non_distributed);
+
+        // Compare results: both should have the same data
+        let total_rows_distributed: usize = batches_distributed.iter().map(|b| b.num_rows()).sum();
+        let total_rows_non_distributed: usize = batches_non_distributed.iter().map(|b| b.num_rows()).sum();
+
+        assert_eq!(
+            total_rows_distributed, total_rows_non_distributed,
+            "Row count mismatch: distributed={}, non-distributed={}",
+            total_rows_distributed, total_rows_non_distributed
+        );
+
+        // Compare the actual data by converting to strings and comparing
+        // Since both are sorted by (f_dkey, timestamp), they should be identical
+        assert_eq!(
+            result_distributed.to_string(),
+            result_non_distributed.to_string(),
+            "Results differ between distributed and non-distributed execution"
+        );
+
+        println!("\n✓ Verified: Distributed and non-distributed results are identical ({} rows)", total_rows_distributed);
+
+        // Expected plan with f_dkey first (from fact table) and sorted fact table
+        // The fact table is declared as sorted by (f_dkey, timestamp)
+        // Still shows SortExec because the join doesn't preserve sort order
+        let expected_plan = r#"┌───── DistributedExec ── Tasks: t0:[p0] 
+│ SortPreservingMergeExec: [f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST]
+│   [Stage 1] => NetworkCoalesceExec: output_partitions=4, input_tasks=2
+└──────────────────────────────────────────────────
+  ┌───── Stage 1 ── Tasks: t0:[p0..p1] t1:[p2..p3] 
+  │ SortExec: expr=[f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST], preserve_partitioning=[true]
+  │   ProjectionExec: expr=[f_dkey@5 as f_dkey, timestamp@3 as timestamp, value@4 as value, env@0 as env, service@1 as service, host@2 as host]
+  │     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@3, f_dkey@2)], projection=[env@0, service@1, host@2, timestamp@4, value@5, f_dkey@6]
+  │       PartitionIsolatorExec: t0:[p0,p1,__,__] t1:[__,__,p0,p1] 
+  │         DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.parquet], [/testdata/join_test_hive/dim/d_dkey=B/data.parquet], [/testdata/join_test_hive/dim/d_dkey=C/data.parquet], [/testdata/join_test_hive/dim/d_dkey=D/data.parquet]]}, projection=[env, service, host, d_dkey], file_type=parquet, predicate=DynamicFilter [ empty ]
+  │       PartitionIsolatorExec: t0:[p0,p1,__,__] t1:[__,__,p0,p1]  
+  │         DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.parquet], [/testdata/join_test_hive/fact/f_dkey=B/data3.parquet, /testdata/join_test_hive/fact/f_dkey=B/data2.parquet, /testdata/join_test_hive/fact/f_dkey=B/data.parquet], [/testdata/join_test_hive/fact/f_dkey=C/data2.parquet, /testdata/join_test_hive/fact/f_dkey=C/data.parquet], [/testdata/join_test_hive/fact/f_dkey=D/data.parquet]]}, projection=[timestamp, value, f_dkey], file_type=parquet, predicate=DynamicFilter [ empty ]
+  └────────────────────────────────────────────────── 
+"#;
+
+        println!("{}", physical_distributed_str);
+
+        // Normalize paths for comparison
+        let normalize_paths = |s: &str| -> String {
+            s.lines()
+                .map(|line| {
+                    if line.contains("testdata/join_test_hive") {
+                        let re = regex::Regex::new(r"[^,\s\[]*(/testdata/join_test_hive/[^,\s\]]+)").unwrap();
+                        re.replace_all(line, "$1").to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        
+        let normalized_expected = normalize_paths(&expected_plan);
+        let normalized_actual = normalize_paths(&physical_distributed_str);
+        
+        assert_eq!(
+            normalized_actual.trim(),
+            normalized_expected.trim(),
+            "\n\nActual plan does not match expected plan!\n\nExpected:\n{}\n\nActual:\n{}\n",
+            normalized_expected,
+            normalized_actual
+        );
+
+        // Expected non-distributed plan (with preserve_file_partitions enabled)
+        let expected_non_distributed_plan = r#"SortPreservingMergeExec: [f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST]
+  SortExec: expr=[f_dkey@0 ASC NULLS LAST, timestamp@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[f_dkey@5 as f_dkey, timestamp@3 as timestamp, value@4 as value, env@0 as env, service@1 as service, host@2 as host]
+      HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@3, f_dkey@2)], projection=[env@0, service@1, host@2, timestamp@4, value@5, f_dkey@6]
+        DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.parquet], [/testdata/join_test_hive/dim/d_dkey=B/data.parquet], [/testdata/join_test_hive/dim/d_dkey=C/data.parquet], [/testdata/join_test_hive/dim/d_dkey=D/data.parquet]]}, projection=[env, service, host, d_dkey], file_type=parquet, predicate=DynamicFilter [ empty ]
+        DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.parquet], [/testdata/join_test_hive/fact/f_dkey=B/data3.parquet, /testdata/join_test_hive/fact/f_dkey=B/data2.parquet, /testdata/join_test_hive/fact/f_dkey=B/data.parquet], [/testdata/join_test_hive/fact/f_dkey=C/data2.parquet, /testdata/join_test_hive/fact/f_dkey=C/data.parquet], [/testdata/join_test_hive/fact/f_dkey=D/data.parquet]]}, projection=[timestamp, value, f_dkey], file_type=parquet, predicate=DynamicFilter [ empty ]
+"#; 
 
         let normalized_expected_nd = normalize_paths(&expected_non_distributed_plan);
         let normalized_actual_nd = normalize_paths(&physical_non_distributed_str);
