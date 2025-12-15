@@ -112,6 +112,14 @@ mod tests {
         use datafusion::prelude::SessionContext;
         let ctx_non_distributed = SessionContext::new();
 
+        // Enable file partitioning preservation in non-distributed context too
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.preserve_file_partitions = 1;
+
+        // Set target_partitions to 4 (same as distributed context)
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .execution.target_partitions = 4;
+
         // Register the same tables in non-distributed context
         let dim_options_nd = CsvReadOptions::default()
             .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
@@ -133,6 +141,12 @@ mod tests {
 
         // Execute the same query in non-distributed context
         let df_non_distributed = ctx_non_distributed.sql(query).await?;
+        let physical_non_distributed = df_non_distributed.clone().create_physical_plan().await?;
+        let physical_non_distributed_str = display_plan_ascii(physical_non_distributed.as_ref(), false);
+
+        println!("\n=== NON-DISTRIBUTED PLAN ===");
+        println!("{}", physical_non_distributed_str);
+
         let batches_non_distributed = df_non_distributed.collect().await?;
         let result_non_distributed = pretty_format_batches(&batches_non_distributed)?;
 
@@ -223,6 +237,34 @@ mod tests {
             "\n\nActual plan does not match expected plan!\n\nExpected:\n{}\n\nActual:\n{}\n",
             normalized_expected,
             normalized_actual
+        );
+
+        // Expected non-distributed plan (with preserve_file_partitions and target_partitions=4)
+        let expected_non_distributed_plan = r#"SortPreservingMergeExec: [env@0 ASC NULLS LAST, time_bin@1 ASC NULLS LAST]
+  SortExec: expr=[env@0 ASC NULLS LAST, time_bin@1 ASC NULLS LAST], preserve_partitioning=[true]
+    ProjectionExec: expr=[env@0 as env, time_bin@1 as time_bin, avg(a.max_bin_value)@2 as avg_max_value]
+      AggregateExec: mode=FinalPartitioned, gby=[env@0 as env, time_bin@1 as time_bin], aggr=[avg(a.max_bin_value)]
+        CoalesceBatchesExec: target_batch_size=8192
+          RepartitionExec: partitioning=Hash([env@0, time_bin@1], 4), input_partitions=4
+            AggregateExec: mode=Partial, gby=[env@1 as env, time_bin@0 as time_bin], aggr=[avg(a.max_bin_value)]
+              ProjectionExec: expr=[date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 30000000000 }"),j.timestamp)@1 as time_bin, max(j.env)@2 as env, max(j.value)@3 as max_bin_value]
+                AggregateExec: mode=SinglePartitioned, gby=[f_dkey@0 as f_dkey, date_bin(IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 30000000000 }, timestamp@2) as date_bin(IntervalMonthDayNano("IntervalMonthDayNano { months: 0, days: 0, nanoseconds: 30000000000 }"),j.timestamp)], aggr=[max(j.env), max(j.value)], ordering_mode=Sorted
+                  ProjectionExec: expr=[f_dkey@3 as f_dkey, env@0 as env, timestamp@1 as timestamp, value@2 as value]
+                    HashJoinExec: mode=Partitioned, join_type=Inner, on=[(d_dkey@1, f_dkey@2)], projection=[env@0, timestamp@2, value@3, f_dkey@4]
+                      FilterExec: service@1 = log, projection=[env@0, d_dkey@2]
+                        DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/dim/d_dkey=A/data.csv], [/testdata/join_test_hive/dim/d_dkey=B/data.csv], [/testdata/join_test_hive/dim/d_dkey=C/data.csv], [/testdata/join_test_hive/dim/d_dkey=D/data.csv]]}, projection=[env, service, d_dkey], file_type=csv, has_header=true
+                      DataSourceExec: file_groups={4 groups: [[/testdata/join_test_hive/fact/f_dkey=A/data.csv], [/testdata/join_test_hive/fact/f_dkey=B/data3.csv, /testdata/join_test_hive/fact/f_dkey=B/data2.csv, /testdata/join_test_hive/fact/f_dkey=B/data.csv], [/testdata/join_test_hive/fact/f_dkey=C/data2.csv, /testdata/join_test_hive/fact/f_dkey=C/data.csv], [/testdata/join_test_hive/fact/f_dkey=D/data.csv]]}, projection=[timestamp, value, f_dkey], file_type=csv, has_header=true
+"#;
+
+        let normalized_expected_nd = normalize_paths(&expected_non_distributed_plan);
+        let normalized_actual_nd = normalize_paths(&physical_non_distributed_str);
+        
+        assert_eq!(
+            normalized_actual_nd.trim(),
+            normalized_expected_nd.trim(),
+            "\n\nActual non-distributed plan does not match expected!\n\nExpected:\n{}\n\nActual:\n{}\n",
+            normalized_expected_nd,
+            normalized_actual_nd
         );
 
         // Verify we got results
@@ -346,6 +388,14 @@ mod tests {
         use datafusion::prelude::SessionContext;
         let ctx_non_distributed = SessionContext::new();
 
+        // Enable file partitioning preservation in non-distributed context too
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .optimizer.preserve_file_partitions = 1;
+
+        // Set target_partitions to 4 (same as distributed context)
+        ctx_non_distributed.state_ref().write().config_mut().options_mut()
+            .execution.target_partitions = 4;
+
         // Register the same tables in non-distributed context
         let dim_options_nd = CsvReadOptions::default()
             .table_partition_cols(vec![("d_dkey".to_string(), DataType::Utf8)]);
@@ -367,6 +417,12 @@ mod tests {
 
         // Execute the same query in non-distributed context
         let df_non_distributed = ctx_non_distributed.sql(query).await?;
+        let physical_non_distributed = df_non_distributed.clone().create_physical_plan().await?;
+        let physical_non_distributed_str = display_plan_ascii(physical_non_distributed.as_ref(), false);
+
+        println!("\n=== NON-DISTRIBUTED PLAN ===");
+        println!("{}", physical_non_distributed_str);
+
         let batches_non_distributed = df_non_distributed.collect().await?;
         let result_non_distributed = pretty_format_batches(&batches_non_distributed)?;
 
